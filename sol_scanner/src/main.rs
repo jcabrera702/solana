@@ -74,10 +74,15 @@ fn scan_file(path: &Path) -> Vec<Finding> {
             break;
         }
 
-        let line_num = idx + 1;
-        let snippet: String = trimmed.chars().take(120).collect();
+        let code_only = trimmed.split("//").next().unwrap_or("").trim();
+        if code_only.is_empty() {
+            continue;
+        }
 
-        if (trimmed.contains("UncheckedAccount") || trimmed.contains("AccountInfo"))
+        let line_num = idx + 1;
+        let snippet: String = code_only.chars().take(120).collect();
+
+        if (code_only.contains("UncheckedAccount") || code_only.contains("AccountInfo"))
             && !has_anchor_guard(&lines, idx)
         {
             findings.push(Finding {
@@ -89,7 +94,7 @@ fn scan_file(path: &Path) -> Vec<Finding> {
             });
         }
 
-        if trimmed.contains("init_if_needed") {
+        if code_only.contains("init_if_needed") {
             findings.push(Finding {
                 rule: "SOL-002",
                 severity: "HIGH",
@@ -99,7 +104,7 @@ fn scan_file(path: &Path) -> Vec<Finding> {
             });
         }
 
-        if has_arithmetic_op(trimmed) {
+        if has_arithmetic_op(code_only) {
             findings.push(Finding {
                 rule: "SOL-003",
                 severity: "MEDIUM",
@@ -109,7 +114,7 @@ fn scan_file(path: &Path) -> Vec<Finding> {
             });
         }
 
-        if trimmed.contains(".unwrap(") || trimmed.contains(".expect(") {
+        if code_only.contains(".unwrap(") || code_only.contains(".expect(") {
             findings.push(Finding {
                 rule: "SOL-004",
                 severity: "LOW",
