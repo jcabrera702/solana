@@ -11,10 +11,22 @@ struct Finding {
     snippet: String,
 }
 
-fn has_anchor_guard(lines: &[&str], idx: usize) -> bool {
-    let start = idx.saturating_sub(5);
+enum AccountGuard {
+    StrongConstraint,
+    ManualCheckOnly,
+    Unguarded,
+}
+
+fn check_account_guard(lines: &[&str], idx: usize) -> AccountGuard {
+    let start = idx.saturating_sub(8);
     let window = lines[start..idx].join("\n");
-    window.contains("/// CHECK:") || window.contains("#[account(")
+    if window.contains("seeds =") || window.contains("address =") || window.contains("owner =") {
+        AccountGuard::StrongConstraint
+    } else if window.contains("/// CHECK:") || window.contains("#[account(") {
+        AccountGuard::ManualCheckOnly
+    } else {
+        AccountGuard::Unguarded
+    }
 }
 
 fn has_arithmetic_op(line: &str) -> bool {
@@ -82,16 +94,24 @@ fn scan_file(path: &Path) -> Vec<Finding> {
         let line_num = idx + 1;
         let snippet: String = code_only.chars().take(120).collect();
 
-        if (code_only.contains("UncheckedAccount") || code_only.contains("AccountInfo"))
-            && !has_anchor_guard(&lines, idx)
-        {
-            findings.push(Finding {
-                rule: "SOL-001",
-                severity: "HIGH",
-                file: path.to_path_buf(),
-                line: line_num,
-                snippet: snippet.clone(),
-            });
+        if code_only.contains("UncheckedAccount") || code_only.contains("AccountInfo") {
+            match check_account_guard(&lines, idx) {
+                AccountGuard::Unguarded => findings.push(Finding {
+                    rule: "SOL-001A",
+                    severity: "HIGH",
+                    file: path.to_path_buf(),
+                    line: line_num,
+                    snippet: snippet.clone(),
+                }),
+                AccountGuard::ManualCheckOnly => findings.push(Finding {
+                    rule: "SOL-001B",
+                    severity: "INFO",
+                    file: path.to_path_buf(),
+                    line: line_num,
+                    snippet: snippet.clone(),
+                }),
+                AccountGuard::StrongConstraint => {}
+            }
         }
 
         if code_only.contains("init_if_needed") {
@@ -118,6 +138,40 @@ fn scan_file(path: &Path) -> Vec<Finding> {
             findings.push(Finding {
                 rule: "SOL-004",
                 severity: "LOW",
+                file: path.to_path_buf(),
+                line: line_num,
+                snippet,
+            });
+        }
+
+        if code_only.contains("remaining_accounts") {
+            findings.push(Finding {
+                rule: "SOL-005",
+                severity: "HIGH",
+                file: path.to_path_buf(),
+                line: line_num,
+                snippet: snippet.clone(),
+            });
+        }
+
+        if code_only.contains("invoke(") || code_only.contains("invoke_signed(") {
+            findings.push(Finding {
+                rule: "SOL-006",
+                severity: "HIGH",
+                file: path.to_path_buf(),
+                line: line_num,
+                snippet: snippet.clone(),
+            });
+        }
+
+        if code_only.contains(" as u64")
+            || code_only.contains(" as u32")
+            || code_only.contains(" as u16")
+            || code_only.contains(" as u8")
+        {
+            findings.push(Finding {
+                rule: "SOL-007",
+                severity: "MEDIUM",
                 file: path.to_path_buf(),
                 line: line_num,
                 snippet,
