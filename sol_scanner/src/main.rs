@@ -3,7 +3,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
-use syn::{Attribute, Expr, ExprBinary, ExprCast, ExprMethodCall, Field, ItemMod, ItemStruct};
+use syn::{
+    Attribute, Expr, ExprBinary, ExprCast, ExprMethodCall, Field, ImplItemFn, ItemFn, ItemMod,
+    ItemStruct, TraitItemFn,
+};
 use walkdir::WalkDir;
 
 struct Finding {
@@ -18,6 +21,7 @@ struct FileScanner<'a> {
     path: &'a Path,
     lines: Vec<&'a str>,
     findings: Vec<Finding>,
+    in_function: bool,
 }
 
 impl<'a> FileScanner<'a> {
@@ -26,6 +30,7 @@ impl<'a> FileScanner<'a> {
             path,
             lines: content.lines().collect(),
             findings: Vec::new(),
+            in_function: false,
         }
     }
 
@@ -114,6 +119,19 @@ fn inspect_account_field(scanner: &mut FileScanner, field: &Field) {
             }
         }
     }
+
+    // SOL-008: Writable Anchor account with no relational or PDA constraints
+    let is_mut = attr_blob.contains("mut");
+    let has_any_guard = attr_blob.contains("init")
+        || attr_blob.contains("has_one")
+        || attr_blob.contains("seeds =")
+        || attr_blob.contains("address =")
+        || attr_blob.contains("owner =")
+        || attr_blob.contains("constraint =");
+
+    if is_mut && !has_any_guard {
+        scanner.record("SOL-008", "HIGH", line);
+    }
 }
 
 impl<'ast, 'a> Visit<'ast> for FileScanner<'a> {
@@ -123,6 +141,27 @@ impl<'ast, 'a> Visit<'ast> for FileScanner<'a> {
             return;
         }
         visit::visit_item_mod(self, node);
+    }
+
+    fn visit_item_fn(&mut self, node: &'ast ItemFn) {
+        let was_in_fn = self.in_function;
+        self.in_function = true;
+        visit::visit_item_fn(self, node);
+        self.in_function = was_in_fn;
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast ImplItemFn) {
+        let was_in_fn = self.in_function;
+        self.in_function = true;
+        visit::visit_impl_item_fn(self, node);
+        self.in_function = was_in_fn;
+    }
+
+    fn visit_trait_item_fn(&mut self, node: &'ast TraitItemFn) {
+        let was_in_fn = self.in_function;
+        self.in_function = true;
+        visit::visit_trait_item_fn(self, node);
+        self.in_function = was_in_fn;
     }
 
     // Inspect #[derive(Accounts)] structs directly
@@ -137,13 +176,15 @@ impl<'ast, 'a> Visit<'ast> for FileScanner<'a> {
 
     // SOL-003: Binary arithmetic in expressions (+, -, *, /, +=, -=, *=, /=)
     fn visit_expr_binary(&mut self, node: &'ast ExprBinary) {
-        use syn::BinOp::*;
-        match node.op {
-            Add(_) | Sub(_) | Mul(_) | Div(_) | AddAssign(_) | SubAssign(_) | MulAssign(_)
-            | DivAssign(_) => {
-                self.record("SOL-003", "MEDIUM", node.span().start().line);
+        if self.in_function {
+            use syn::BinOp::*;
+            match node.op {
+                Add(_) | Sub(_) | Mul(_) | Div(_) | AddAssign(_) | SubAssign(_) | MulAssign(_)
+                | DivAssign(_) => {
+                    self.record("SOL-003", "MEDIUM", node.span().start().line);
+                }
+                _ => {}
             }
-            _ => {}
         }
         visit::visit_expr_binary(self, node);
     }
@@ -171,6 +212,9 @@ impl<'ast, 'a> Visit<'ast> for FileScanner<'a> {
                 let func_str = quote::ToTokens::to_token_stream(&call.func).to_string();
                 if func_str.ends_with("invoke") || func_str.ends_with("invoke_signed") {
                     self.record("SOL-006", "HIGH", call.span().start().line);
+                }
+                if func_str.ends_with("next_account_info") {
+                    self.record("SOL-009", "INFO", call.span().start().line);
                 }
             }
             _ => {}
@@ -208,6 +252,7 @@ fn main() {
         eprintln!("Usage: cargo run -- <path_to_programs_dir>");
         std::process::exit(1);
     };
+    let high_only = args.any(|arg| arg == "--high");
 
     let target_path = Path::new(&target);
     if !target_path.exists() {
@@ -232,13 +277,25 @@ fn main() {
         all_findings.extend(scan_file(file));
     }
 
+    let high_count = all_findings.iter().filter(|f| f.severity == "HIGH").count();
+    let med_count = all_findings.iter().filter(|f| f.severity == "MEDIUM").count();
+    let low_count = all_findings.iter().filter(|f| f.severity == "LOW").count();
+    let info_count = all_findings.iter().filter(|f| f.severity == "INFO").count();
+
     println!(
-        "Scanned {} Rust files | Found {} potential leads\n",
+        "Scanned {} Rust files | Total: {} (HIGH: {}, MEDIUM: {}, LOW: {}, INFO: {})\n",
         rs_files.len(),
-        all_findings.len()
+        all_findings.len(),
+        high_count,
+        med_count,
+        low_count,
+        info_count
     );
 
     for f in all_findings {
+        if high_only && f.severity != "HIGH" {
+            continue;
+        }
         println!("[{}] {} — {}:{}", f.severity, f.rule, f.file.display(), f.line);
         println!("    {}", f.snippet);
     }
