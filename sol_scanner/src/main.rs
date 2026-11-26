@@ -85,7 +85,11 @@ fn has_derive_accounts(attrs: &[Attribute]) -> bool {
 
 fn inspect_account_field(scanner: &mut FileScanner, field: &Field) {
     let ty_str = quote::ToTokens::to_token_stream(&field.ty).to_string();
-    let line = field.span().start().line;
+    let line = field
+        .ident
+        .as_ref()
+        .map(|ident| ident.span().start().line)
+        .unwrap_or_else(|| field.span().start().line);
 
     // Collect full attribute text regardless of how many lines #[account(...)] spans
     let mut attr_blob = String::new();
@@ -106,7 +110,10 @@ fn inspect_account_field(scanner: &mut FileScanner, field: &Field) {
     }
 
     // SOL-001A / SOL-001B: UncheckedAccount or raw AccountInfo
-    if ty_str.contains("UncheckedAccount") || ty_str.contains("AccountInfo") {
+    let is_unchecked_or_raw =
+        ty_str.contains("UncheckedAccount") || ty_str.contains("AccountInfo");
+
+    if is_unchecked_or_raw {
         let has_strong_constraint = attr_blob.contains("seeds =")
             || attr_blob.contains("address =")
             || attr_blob.contains("owner =");
@@ -121,7 +128,11 @@ fn inspect_account_field(scanner: &mut FileScanner, field: &Field) {
     }
 
     // SOL-008: Writable Anchor account with no relational or PDA constraints
-    let is_mut = attr_blob.contains("mut");
+    // Skip Signer / SystemAccount and avoid duplicate alerts on UncheckedAccount/AccountInfo
+    let is_signer_or_system = ty_str.contains("Signer") || ty_str.contains("SystemAccount");
+    let has_mut_token = attr_blob
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .any(|tok| tok == "mut");
     let has_any_guard = attr_blob.contains("init")
         || attr_blob.contains("has_one")
         || attr_blob.contains("seeds =")
@@ -129,7 +140,7 @@ fn inspect_account_field(scanner: &mut FileScanner, field: &Field) {
         || attr_blob.contains("owner =")
         || attr_blob.contains("constraint =");
 
-    if is_mut && !has_any_guard {
+    if !is_unchecked_or_raw && !is_signer_or_system && has_mut_token && !has_any_guard {
         scanner.record("SOL-008", "HIGH", line);
     }
 }
